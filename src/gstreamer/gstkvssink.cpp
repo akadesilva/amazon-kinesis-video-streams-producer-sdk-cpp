@@ -116,7 +116,7 @@ GST_DEBUG_CATEGORY_STATIC (gst_kvs_sink_debug);
 #define DEFAULT_IOT_COMPLETION_TIMEOUT_SEC 5
 #define DEFAULT_CREDENTIAL_FILE_PATH ".kvs/credential"
 #define DEFAULT_FRAME_DURATION_MS 2
-#define DEFAULT_IMG_GEN FALSE
+#define DEFAULT_IMG_GEN 0
 
 #define KVS_ADD_METADATA_G_STRUCT_NAME "kvs-add-metadata"
 #define KVS_ADD_METADATA_NAME "name"
@@ -683,10 +683,10 @@ gst_kvs_sink_class_init(GstKvsSinkClass *klass) {
                                           "GStreamer AWS KVS plugin",
                                           "AWS KVS <kinesis-video-support@amazon.com>");
     g_object_class_install_property (gobject_class, PROP_IMG_GEN,
-                                     g_param_spec_boolean ("img-gen", "Generate images",
-                                                           "Trigger image S3 delivery", DEFAULT_IMG_GEN,
+                                     g_param_spec_uint ("img-gen", "Generate images",
+                                                           "Trigger image S3 delivery every N number of key frames. Set to 0 to disable (default)",
+                                                            0, G_MAXUINT, DEFAULT_IMG_GEN,
                                                            (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
-
     gst_element_class_add_pad_template(gstelement_class, gst_static_pad_template_get(&audiosink_templ));
     gst_element_class_add_pad_template(gstelement_class, gst_static_pad_template_get(&videosink_templ));
 
@@ -952,7 +952,7 @@ gst_kvs_sink_set_property(GObject *object, guint prop_id,
             kvssink->allow_create_stream = g_value_get_boolean(value);
             break;
         case PROP_IMG_GEN:
-            kvssink->img_gen = g_value_get_boolean (value);
+            kvssink->img_gen = g_value_get_uint (value);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1089,7 +1089,7 @@ gst_kvs_sink_get_property(GObject *object, guint prop_id, GValue *value,
             g_value_set_boolean (value, kvssink->allow_create_stream);
             break;
         case PROP_IMG_GEN:
-            g_value_set_boolean (value, kvssink->img_gen);
+            g_value_set_uint (value, kvssink->img_gen);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1227,15 +1227,14 @@ void create_kinesis_video_frame(Frame *frame, const nanoseconds &pts, const nano
 }
 
 bool put_frame(shared_ptr<KvsSinkCustomData> data, void *frame_data, size_t len, const nanoseconds &pts,
-          const nanoseconds &dts, FRAME_FLAGS flags, uint64_t track_id, uint32_t index, bool img_gen) {
+          const nanoseconds &dts, FRAME_FLAGS flags, uint64_t track_id, uint32_t index, bool put_img_gen_tag) {
 
     Frame frame;
     create_kinesis_video_frame(&frame, pts, dts, flags, frame_data, len, track_id, index);
     bool ret = data->kinesis_video_stream->putFrame(frame);
-    if(img_gen){
-        if (CHECK_FRAME_FLAG_KEY_FRAME(flags)) {
-            kinesis_video_stream->putEventMetadata(STREAM_EVENT_TYPE_NOTIFICATION | STREAM_EVENT_TYPE_IMAGE_GENERATION, NULL);
-        }
+    //add stream event notification and image generation meta data for automated S3 delivery
+    if(put_img_gen_tag){
+        kinesis_video_stream->putEventMetadata(STREAM_EVENT_TYPE_NOTIFICATION | STREAM_EVENT_TYPE_IMAGE_GENERATION, NULL);
     }
     if (data->get_metrics && ret) {
         if (CHECK_FRAME_FLAG_KEY_FRAME(flags)  || data->on_first_frame) {
@@ -1269,6 +1268,7 @@ gst_kvs_sink_handle_buffer (GstCollectPads * pads,
     GstMapInfo info;
 
     info.data = NULL;
+    bool put_img_gen_tag = false;
     // eos reached
     if (buf == NULL && track_data == NULL) {
         LOG_INFO("Received event for " << kvssink->stream_name);
@@ -1375,10 +1375,18 @@ gst_kvs_sink_handle_buffer (GstCollectPads * pads,
                 buf->pts = buf->dts;
             }
         }
-
+        //if image generation is enabled and the key frame count is right, we need to add a tag
+        
+        if(kvssink->img_gen > 0 && CHECK_FRAME_FLAG_KEY_FRAME(kinesis_video_flags)){
+            if((data->key_frame_count % kvssink->img_gen) == 0){
+                put_img_gen_tag = true;
+            }
+            data->key_frame_count++;
+        }
+        
         put_frame(kvssink->data, info.data, info.size,
                   std::chrono::nanoseconds(buf->pts),
-                  std::chrono::nanoseconds(buf->dts), kinesis_video_flags, track_id, data->frame_count, kvssink->img_gen);
+                  std::chrono::nanoseconds(buf->dts), kinesis_video_flags, track_id, data->frame_count, put_img_gen_tag);
         data->frame_count++;
     } else {
         LOG_WARN("GStreamer buffer is invalid for " << kvssink->stream_name);

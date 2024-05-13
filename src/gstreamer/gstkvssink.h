@@ -143,7 +143,7 @@ struct _GstKvsSink {
     std::unique_ptr<Credentials> credentials_;
     std::shared_ptr<KvsSinkCustomData> data;
 
-    gboolean                    img_gen;
+    guint                    img_gen;
 };
 
 struct _GstKvsSinkClass {
@@ -169,6 +169,7 @@ struct _KvsSinkCustomData {
             get_metrics(false),
             on_first_frame(true),
             frame_count(0),
+            key_frame_count(0),
             first_pts(GST_CLOCK_TIME_NONE),
             producer_start_time(GST_CLOCK_TIME_NONE),
             streamingStopped(false) {}
@@ -182,6 +183,7 @@ struct _KvsSinkCustomData {
     bool use_original_pts;
     bool get_metrics;
     uint32_t frame_count;
+    uint32_t key_frame_count;
     bool on_first_frame;
     std::atomic<bool> streamingStopped;
     uint64_t frame_pts;
